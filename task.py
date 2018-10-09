@@ -82,14 +82,17 @@ class StartEmit2(Stage):
     """
     Starts without an in_q, emits to 2 different out_qs.
     """
-    async def __call__(self, even_out, odd_out):
+    async def __call__(self, even_out, odd_out, austin_out):
         for i in range(1, 10):
             if i % 2 == 0:
                 await even_out.put(i)
             else:
                 await odd_out.put(i)
+                await austin_out.put("asmacdowuzhere")
+
         await even_out.put(None)
         await odd_out.put(None)
+        await austin_out.put(None)
 
 
 class EvenInOddOut(Stage):
@@ -105,14 +108,16 @@ class EvenInOddOut(Stage):
 
 
 class ConfluenceStage(Stage):
-    async def __call__(self, jack_in, walter_in, together_out):
+    async def __call__(self, in_q_list, joined_out):
         self._pending = set()
         self._finished = set()
-        jack_task = self.add_to_pending(jack_in.get())
-        walter_task = self.add_to_pending(walter_in.get())
-        open_jack = True
-        open_walter = True
-        while open_jack or open_walter:
+        open_queues = [None for q in in_q_list]
+        current_tasks = {}
+        for queue in in_q_list:
+            task = self.add_to_pending(queue.get())
+            current_tasks[task] = queue
+
+        while open_queues:
             done, self._pending = await asyncio.wait(
                 self._pending,
                 return_when=asyncio.FIRST_COMPLETED
@@ -120,23 +125,16 @@ class ConfluenceStage(Stage):
             self._finished = self._finished.union(done)
 
             while self._finished:
-                in_from_one_of_em = self._finished.pop()
-                if in_from_one_of_em.result() is None:
-                    if in_from_one_of_em is jack_task:
-                        open_jack = False
-                    elif in_from_one_of_em is walter_task:
-                        open_walter = False
+                out_task = self._finished.pop()
+                if out_task.result() is None:
+                    open_queues.pop()
                 else:
-                    if in_from_one_of_em is jack_task:
-                        # TODO one bit of slop, this happens even when the whole task is finished,
-                        # leaving doomed in.get()s in _pending.
-                        jack_task = self.add_to_pending(jack_in.get())
-                    elif in_from_one_of_em is walter_task:
-                        walter_task = self.add_to_pending(walter_in.get())
-                    await together_out.put(in_from_one_of_em.result())
-
+                    used_queue = current_tasks.pop(out_task)
+                    next_task = self.add_to_pending(used_queue.get())
+                    current_tasks[next_task] = used_queue
+                    await joined_out.put(out_task.result())
         # After both inputs are finished (2 Nones) we close this stage
-        await together_out.put(None)
+        await joined_out.put(None)
 
     def add_to_pending(self, coro):
         task = asyncio.ensure_future(coro)
@@ -166,8 +164,9 @@ async def create_sync_pipeline(maxsize=100):
 
     even_out = asyncio.Queue()
     odd_out = asyncio.Queue()
+    austin_out = asyncio.Queue()
     start = StartEmit2()
-    futures.append(asyncio.ensure_future(start(even_out, odd_out)))
+    futures.append(asyncio.ensure_future(start(even_out, odd_out, austin_out)))
 
     even_in = even_out
     second_odd_out = asyncio.Queue()
@@ -176,9 +175,10 @@ async def create_sync_pipeline(maxsize=100):
 
     jack_in = odd_out
     walter_in = second_odd_out
+    austin_in = austin_out
     together_out = asyncio.Queue()
     confluence = ConfluenceStage()
-    futures.append(asyncio.ensure_future(confluence(jack_in, walter_in, together_out)))
+    futures.append(asyncio.ensure_future(confluence([jack_in, walter_in, austin_in], together_out)))
 
     # sanity_stage = SanityStage()
     # basic_shit = asyncio.Queue()
